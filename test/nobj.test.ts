@@ -1,13 +1,13 @@
 import { describe, test, expect, afterAll } from 'bun:test';
-import { encodeSymbols } from '../nobj';
-import type { TargetPlatform, TargetArch } from '../nobj';
+import { encodeSymbols, hostPlatform } from '../nobj';
+import type { TargetArch } from '../nobj';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 
 // ─── platform / arch detection ────────────────────────────────────────────────
 
-const platform = process.platform as TargetPlatform;
+const platform = hostPlatform();
 const arch     = (process.arch === 'x64' ? 'x64' : 'arm64') as TargetArch;
 const isWin    = platform === 'win32';
 

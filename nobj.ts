@@ -25,7 +25,7 @@ export interface ObjSymbol {
   obj:  SymbolValue;
 }
 
-export type TargetPlatform = 'win32' | 'darwin' | 'linux';
+export type TargetPlatform = 'win32' | 'macos' | 'linux';
 export type TargetArch     = 'x64'   | 'arm64';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -52,6 +52,15 @@ function hostArch(): TargetArch {
   if (process.arch === 'x64')   return 'x64';
   if (process.arch === 'arm64') return 'arm64';
   throw new Error(`Unsupported host architecture: ${process.arch}`);
+}
+
+export function hostPlatform(): TargetPlatform {
+  switch (process.platform) {
+    case 'win32':  return 'win32';
+    case 'darwin': return 'macos';
+    case 'linux':  return 'linux';
+    default: throw new Error(`Unsupported platform: ${process.platform}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -493,12 +502,12 @@ function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
 function dispatch(
   symbols:  ObjSymbol[],
   arch:     TargetArch     = hostArch(),
-  platform: TargetPlatform = process.platform as TargetPlatform,
+  platform: TargetPlatform = hostPlatform(),
 ): Buffer {
   switch (platform) {
-    case 'win32':  return doObjectWindows(symbols, arch);
-    case 'darwin': return doObjectMacOS(symbols, arch);
-    case 'linux':  return doObjectLinux(symbols, arch);
+    case 'win32': return doObjectWindows(symbols, arch);
+    case 'macos': return doObjectMacOS(symbols, arch);
+    case 'linux': return doObjectLinux(symbols, arch);
     default: throw new Error(`Unsupported platform: ${platform}`);
   }
 }
