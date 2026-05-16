@@ -7,9 +7,10 @@ import { join } from 'path';
 
 // ─── platform / arch detection ────────────────────────────────────────────────
 
-const platform = hostPlatform();
-const arch     = (process.arch === 'x64' ? 'x64' : 'arm64') as TargetArch;
-const isWin    = platform === 'win32';
+let platform = process.platform as string
+if(platform === 'darwin') platform = 'macos'; // unify Darwin/macOS naming
+const arch = process.arch
+const isWin    = process.platform === 'win32';
 
 // ─── temp file helpers ────────────────────────────────────────────────────────
 
@@ -74,8 +75,8 @@ const SYMBOLS = [
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
-describe(`nobj — ${platform}/${arch}`, () => {
-  const objExt = isWin ? '.obj' : '.o';
+describe(`nobj ${platform}/${arch}`, () => {
+  const objExt = 'o' //isWin ? '.obj' : '.o';
   const binExt = isWin ? '.exe' : '';
 
   const objPath = tmpPath(`test${objExt}`);
@@ -83,7 +84,7 @@ describe(`nobj — ${platform}/${arch}`, () => {
   const binPath = tmpPath(`main${binExt}`);
 
   test('encodeSymbols returns a non-empty buffer', () => {
-    const buf = encodeSymbols(SYMBOLS, arch, platform);
+    const buf = encodeSymbols(SYMBOLS);
     expect(buf.length).toBeGreaterThan(0);
     writeFileSync(objPath, buf);
   });

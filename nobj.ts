@@ -18,7 +18,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.*/
 
-export type SymbolValue = Buffer | string | number;
+export type SymbolValue = Uint8Array | string | number;
 
 export interface ObjSymbol {
   name: string;
@@ -97,7 +97,7 @@ function doObjectWindows(symbols: ObjSymbol[], arch: TargetArch): Buffer {
   for (const { name, obj } of symbols) {
     strTabSz += name.length + 1;
     directives.push(` /EXPORT:${name},DATA`);
-    if      (Buffer.isBuffer(obj))      dataSz += al(obj.length, 8);
+    if      (obj instanceof Uint8Array)      dataSz += al(obj.length, 8);
     else if (typeof obj === 'string')   dataSz += al(obj.length + 1, 8);
     else if (typeof obj === 'number')   dataSz += 8;
     else throw new Error('Invalid symbol type');
@@ -128,8 +128,8 @@ function doObjectWindows(symbols: ObjSymbol[], arch: TargetArch): Buffer {
     tsd.write(name, strOff, 'ascii');
     strOff += name.length + 1;
 
-    if (Buffer.isBuffer(obj)) {
-      obj.copy(dsd, dataOff);
+    if (obj instanceof Uint8Array) {
+      dsd.set(obj, dataOff);
       dataOff += al(obj.length, 8);
     } else if (typeof obj === 'string') {
       dsd.write(obj, dataOff, 'ascii');
@@ -234,7 +234,7 @@ function doObjectMacOS(symbols: ObjSymbol[], arch: TargetArch): Buffer {
   let dataSz = 0, strTabSz = 1, symTabSz = 0;
 
   for (const { name, obj } of symbols) {
-    if      (Buffer.isBuffer(obj))    dataSz += al(obj.length, 16);
+    if      (obj instanceof Uint8Array)    dataSz += al(obj.length, 16);
     else if (typeof obj === 'string') dataSz += al(obj.length,  16);  // raw bytes, no null
     else if (typeof obj === 'number') dataSz += al(8, 16);            // = 16
     else throw new Error('Invalid symbol type');
@@ -253,8 +253,8 @@ function doObjectMacOS(symbols: ObjSymbol[], arch: TargetArch): Buffer {
     const { name, obj } = symbols[k]!;
     const valueInSection = dataOff;
 
-    if (Buffer.isBuffer(obj)) {
-      obj.copy(dt, dataOff);
+    if (obj instanceof Uint8Array) {
+      dt.set(obj, dataOff);
       dataOff += al(obj.length, 16);
     } else if (typeof obj === 'string') {
       dt.write(obj, dataOff, 'ascii');
@@ -386,7 +386,7 @@ function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
 
   for (const { name, obj } of symbols) {
     strTabSz += name.length + 1;
-    if      (Buffer.isBuffer(obj))    dataSz += al(obj.length, 8);
+    if      (obj instanceof Uint8Array)    dataSz += al(obj.length, 8);
     else if (typeof obj === 'string') dataSz += al(obj.length + 1, 8);
     else if (typeof obj === 'number') dataSz += 8;
     else throw new Error('Invalid symbol type');
@@ -414,8 +414,8 @@ function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
     ts.write(name, strOff, 'ascii');
     strOff += name.length + 1;
 
-    if (Buffer.isBuffer(obj)) {
-      obj.copy(d, dataOff);
+    if (obj instanceof Uint8Array) {
+      d.set(obj, dataOff);
       writeU64(symd, sb + EY.SIZE, obj.length);
       dataOff += al(obj.length, 8);
     } else if (typeof obj === 'string') {

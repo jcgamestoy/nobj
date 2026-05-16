@@ -48,14 +48,8 @@ await Bun.write('assets.o', buf)
 Link normally:
 
 ```bash
-# macOS
+# Any Os
 clang main.c assets.o -o app
-
-# Linux
-clang main.c assets.o -o app
-
-# Windows
-clang-cl main.c assets.obj -o app.exe
 ```
 
 Reference from C with no runtime overhead:
@@ -93,7 +87,7 @@ const buf = encodeSymbols([
 
 | TypeScript type | C declaration            | Notes                                  |
 |-----------------|--------------------------|----------------------------------------|
-| `Buffer`        | `const uint8_t[]`        | Raw bytes, no transformation           |
+| `Uint8Array`    | `const uint8_t[]`        | Raw bytes, no transformation           |
 | `string`        | `const char[]`           | ASCII, null-terminated (except macOS)  |
 | `number`        | `const double`           | IEEE 754, 8 bytes                      |
 
