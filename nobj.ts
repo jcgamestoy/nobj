@@ -33,19 +33,29 @@ export type TargetArch     = 'x64'   | 'arm64';
 /** Align v up to the next multiple of a (a must be a power of two). */
 const al = (v: number, a: number): number => (v + a - 1) & -a;
 
+const enc = new TextEncoder();
+
 /**
  * Write a 64-bit LE uint using two 32-bit writes.
  * Safe for values ≤ 2^53 (all realistic file offsets and sizes).
  */
-function writeU64(buf: Buffer, off: number, val: number): void {
-  buf.writeUInt32LE(val >>> 0,                      off);
-  buf.writeUInt32LE(Math.floor(val / 0x100000000),  off + 4);
+function writeU64(dv: DataView, off: number, val: number): void {
+  dv.setUint32(off,     val >>> 0,                     true);
+  dv.setUint32(off + 4, Math.floor(val / 0x100000000), true);
 }
 
 /** Zero a char[len] field and write an ASCII string (no overflow). */
-function setStr(buf: Buffer, off: number, str: string, len: number): void {
+function setStr(buf: Uint8Array, off: number, str: string, len: number): void {
   buf.fill(0, off, off + len);
-  buf.write(str.substring(0, len), off, 'ascii');
+  buf.set(enc.encode(str.substring(0, len)), off);
+}
+
+function concat(arrays: Uint8Array[]): Uint8Array {
+  const total = arrays.reduce((n, a) => n + a.length, 0);
+  const out = new Uint8Array(total);
+  let ofs = 0;
+  for (const a of arrays) { out.set(a, ofs); ofs += a.length; }
+  return out;
 }
 
 function hostArch(): TargetArch {
@@ -90,25 +100,29 @@ const COFF_SYM_SZ         = 18;
 const COFF_HDR_SZ         = 20;
 const COFF_SECT_SZ        = 40;
 
-function doObjectWindows(symbols: ObjSymbol[], arch: TargetArch): Buffer {
+function doObjectWindows(symbols: ObjSymbol[], arch: TargetArch): Uint8Array {
   let strTabSz = 0, dataSz = 0;
   const directives: string[] = [];
 
   for (const { name, obj } of symbols) {
     strTabSz += name.length + 1;
     directives.push(` /EXPORT:${name},DATA`);
-    if      (obj instanceof Uint8Array)      dataSz += al(obj.length, 8);
+    if      (obj instanceof Uint8Array) dataSz += al(obj.length, 8);
     else if (typeof obj === 'string')   dataSz += al(obj.length + 1, 8);
     else if (typeof obj === 'number')   dataSz += 8;
     else throw new Error('Invalid symbol type');
   }
 
-  const tsd  = Buffer.alloc(strTabSz + 4);              // COFF string table
-  const dsd  = Buffer.alloc(dataSz);                    // .rdata data
-  const tsed = Buffer.from(directives.join(''), 'ascii'); // .drectve content
-  const symd = Buffer.alloc(COFF_SYM_SZ * symbols.length); // per-export symbols
+  const tsd  = new Uint8Array(strTabSz + 4);              // COFF string table
+  const dsd  = new Uint8Array(dataSz);                    // .rdata data
+  const tsed = enc.encode(directives.join(''));            // .drectve content
+  const symd = new Uint8Array(COFF_SYM_SZ * symbols.length); // per-export symbols
 
-  tsd.writeUInt32LE(strTabSz + 4, 0);  // string table size prefix
+  const tsddv  = new DataView(tsd.buffer);
+  const dsddv  = new DataView(dsd.buffer);
+  const symdv  = new DataView(symd.buffer);
+
+  tsddv.setUint32(0, strTabSz + 4, true);  // string table size prefix
 
   let strOff = 4, dataOff = 0;
 
@@ -117,87 +131,88 @@ function doObjectWindows(symbols: ObjSymbol[], arch: TargetArch): Buffer {
     const b = i * COFF_SYM_SZ;
 
     // CoffSymbol: long name (zeros=0 means use string table, offset=strOff)
-    symd.writeUInt32LE(0,        b + 0);   // name.zeros
-    symd.writeUInt32LE(strOff,   b + 4);   // name.offset  → string table
-    symd.writeUInt32LE(dataOff,  b + 8);   // value        = offset in .rdata
-    symd.writeInt16LE(2,         b + 12);  // sectionNumber: .rdata = 2
-    symd.writeUInt16LE(0,        b + 14);  // type
-    symd.writeUInt8(0x2,         b + 16);  // storageClass: IMAGE_SYM_CLASS_EXTERNAL
-    symd.writeUInt8(0,           b + 17);  // numberOfAuxSymbols
+    symdv.setUint32(b + 0,  0,       true);  // name.zeros
+    symdv.setUint32(b + 4,  strOff,  true);  // name.offset  → string table
+    symdv.setUint32(b + 8,  dataOff, true);  // value        = offset in .rdata
+    symdv.setInt16( b + 12, 2,       true);  // sectionNumber: .rdata = 2
+    symdv.setUint16(b + 14, 0,       true);  // type
+    symd[b + 16] = 0x2;                       // storageClass: IMAGE_SYM_CLASS_EXTERNAL
+    symd[b + 17] = 0;                         // numberOfAuxSymbols
 
-    tsd.write(name, strOff, 'ascii');
+    tsd.set(enc.encode(name), strOff);
     strOff += name.length + 1;
 
     if (obj instanceof Uint8Array) {
       dsd.set(obj, dataOff);
       dataOff += al(obj.length, 8);
     } else if (typeof obj === 'string') {
-      dsd.write(obj, dataOff, 'ascii');
+      dsd.set(enc.encode(obj), dataOff);
       dataOff += al(obj.length + 1, 8);
     } else if (typeof obj === 'number') {
-      dsd.writeDoubleLE(obj, dataOff);
+      dsddv.setFloat64(dataOff, obj, true);
       dataOff += 8;
     }
   }
 
   // ── Coff header struct ──────────────────────────────────────────────────────
 
-  const hd      = Buffer.alloc(COFF_TOTAL_SZ);
+  const hd    = new Uint8Array(COFF_TOTAL_SZ);
+  const hddv  = new DataView(hd.buffer);
   const machine = arch === 'x64' ? 0x8664 : 0xaa64;
   const ts      = Math.floor(Date.now() / 1000);
 
   // CoffHeader @ 0
-  hd.writeUInt16LE(machine,              0);
-  hd.writeUInt16LE(2,                    2);   // numberOfSections
-  hd.writeUInt32LE(ts,                   4);   // timeDateStamp
-  hd.writeUInt32LE(COFF_OFFSETOF_RDATA,  8);   // pointerToSymbolTable
-  hd.writeUInt32LE(symbols.length + 5,  12);   // numberOfSymbols (5 built-in + N exports)
+  hddv.setUint16(0,  machine,             true);
+  hddv.setUint16(2,  2,                   true);  // numberOfSections
+  hddv.setUint32(4,  ts,                  true);  // timeDateStamp
+  hddv.setUint32(8,  COFF_OFFSETOF_RDATA, true);  // pointerToSymbolTable
+  hddv.setUint32(12, symbols.length + 5,  true);  // numberOfSymbols (5 built-in + N exports)
   // sizeOfOptionalHeader=0, flags=0  (zeroed)
 
   // CoffSection[0]: .drectve @ 20
   const drectvePtr = COFF_TOTAL_SZ + symd.length + tsd.length;
   setStr(hd, COFF_HDR_SZ, '.drectve', 8);
-  hd.writeUInt32LE(tsed.length,    COFF_HDR_SZ + 16);  // sizeOfRawData
-  hd.writeUInt32LE(drectvePtr,     COFF_HDR_SZ + 20);  // pointerToRawData
-  hd.writeUInt32LE(0x00100a00,     COFF_HDR_SZ + 36);  // flags
+  hddv.setUint32(COFF_HDR_SZ + 16, tsed.length,  true);  // sizeOfRawData
+  hddv.setUint32(COFF_HDR_SZ + 20, drectvePtr,   true);  // pointerToRawData
+  hddv.setUint32(COFF_HDR_SZ + 36, 0x00100a00,   true);  // flags
 
   // CoffSection[1]: .rdata @ 60
   const rdataPtr = al(COFF_TOTAL_SZ + symd.length + tsd.length + tsed.length, 8);
   setStr(hd, COFF_HDR_SZ + COFF_SECT_SZ, '.rdata', 8);
-  hd.writeUInt32LE(dsd.length,  COFF_HDR_SZ + COFF_SECT_SZ + 16);
-  hd.writeUInt32LE(rdataPtr,    COFF_HDR_SZ + COFF_SECT_SZ + 20);
-  hd.writeUInt32LE(0x40300040,  COFF_HDR_SZ + COFF_SECT_SZ + 36);
+  hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 16, dsd.length,  true);
+  hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 20, rdataPtr,    true);
+  hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 36, 0x40300040,  true);
 
   // CoffSymbol: .rdata section symbol @ 100
   setStr(hd, 100, '.rdata', 8);
-  hd.writeInt16LE(2,   100 + 12);  // sectionNumber
-  hd.writeUInt8(0x3,  100 + 16);  // storageClass: IMAGE_SYM_CLASS_STATIC
-  hd.writeUInt8(1,    100 + 17);  // numberOfAuxSymbols
+  hddv.setInt16(100 + 12, 2,  true);  // sectionNumber
+  hd[100 + 16] = 0x3;                  // storageClass: IMAGE_SYM_CLASS_STATIC
+  hd[100 + 17] = 1;                    // numberOfAuxSymbols
 
   // CoffAuxSymbol for .rdata @ 118
-  hd.writeUInt32LE(dsd.length, 118 + 0);   // length
-  hd.writeUInt16LE(2,          118 + 12);  // number (= section index)
+  hddv.setUint32(118 + 0,  dsd.length, true);  // length
+  hddv.setUint16(118 + 12, 2,          true);  // number (= section index)
 
   // CoffSymbol: .drectve section symbol @ 136
   setStr(hd, 136, '.drectve', 8);
-  hd.writeInt16LE(1,   136 + 12);
-  hd.writeUInt8(0x3,  136 + 16);
-  hd.writeUInt8(1,    136 + 17);
+  hddv.setInt16(136 + 12, 1,  true);
+  hd[136 + 16] = 0x3;
+  hd[136 + 17] = 1;
 
   // CoffAuxSymbol for .drectve @ 154
-  hd.writeUInt32LE(tsed.length, 154 + 0);
-  hd.writeUInt16LE(1,           154 + 12);
+  hddv.setUint32(154 + 0,  tsed.length, true);
+  hddv.setUint16(154 + 12, 1,           true);
 
   // CoffSymbol: @feat.00 @ 172
   setStr(hd, 172, '@feat.00', 8);
-  hd.writeInt16LE(-1,  172 + 12);  // IMAGE_SYM_ABSOLUTE
-  hd.writeUInt8(0x3,  172 + 16);
+  hddv.setInt16(172 + 12, -1, true);  // IMAGE_SYM_ABSOLUTE
+  hd[172 + 16] = 0x3;
 
   // Pad tsed to 8-byte boundary so .rdata starts aligned
   const pad       = rdataPtr - (COFF_TOTAL_SZ + symd.length + tsd.length + tsed.length);
-  const tsedFinal = pad > 0 ? Buffer.concat([tsed, Buffer.alloc(pad)]) : tsed;
+  const tsedFinal = pad > 0 ? concat([tsed, new Uint8Array(pad)]) : tsed;
 
-  return Buffer.concat([hd, symd, tsd, tsedFinal, dsd]);
+  return concat([hd, symd, tsd, tsedFinal, dsd]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -230,22 +245,25 @@ const MMO  = 264;  // mach_minimun_os_command
 const MSYM = 288;  // mach_symtab_command
 const MDYS = 312;  // mach_symtab_info  (LC_DYSYMTAB)
 
-function doObjectMacOS(symbols: ObjSymbol[], arch: TargetArch): Buffer {
+function doObjectMacOS(symbols: ObjSymbol[], arch: TargetArch): Uint8Array {
   let dataSz = 0, strTabSz = 1, symTabSz = 0;
 
   for (const { name, obj } of symbols) {
-    if      (obj instanceof Uint8Array)    dataSz += al(obj.length, 16);
-    else if (typeof obj === 'string') dataSz += al(obj.length,  16);  // raw bytes, no null
-    else if (typeof obj === 'number') dataSz += al(8, 16);            // = 16
+    if      (obj instanceof Uint8Array) dataSz += al(obj.length, 16);
+    else if (typeof obj === 'string')   dataSz += al(obj.length,  16);  // raw bytes, no null
+    else if (typeof obj === 'number')   dataSz += al(8, 16);            // = 16
     else throw new Error('Invalid symbol type');
     strTabSz += name.length + 2;  // '_' + name + '\0'
     symTabSz += 16;               // sizeof(mach_sym_entry)
   }
   strTabSz = al(strTabSz, 8);
 
-  const dt  = Buffer.alloc(dataSz);    // data section
-  const nt  = Buffer.alloc(strTabSz);  // string table  (first byte is '\0' by alloc)
-  const nti = Buffer.alloc(symTabSz);  // symbol entries
+  const dt  = new Uint8Array(dataSz);    // data section
+  const nt  = new Uint8Array(strTabSz);  // string table  (first byte is '\0' by alloc)
+  const nti = new Uint8Array(symTabSz);  // symbol entries
+
+  const dtdv  = new DataView(dt.buffer);
+  const ntidv = new DataView(nti.buffer);
 
   let dataOff = 0, strOff = 1;
 
@@ -257,88 +275,89 @@ function doObjectMacOS(symbols: ObjSymbol[], arch: TargetArch): Buffer {
       dt.set(obj, dataOff);
       dataOff += al(obj.length, 16);
     } else if (typeof obj === 'string') {
-      dt.write(obj, dataOff, 'ascii');
+      dt.set(enc.encode(obj), dataOff);
       dataOff += al(obj.length, 16);
     } else if (typeof obj === 'number') {
-      dt.writeDoubleLE(obj, dataOff);
+      dtdv.setFloat64(dataOff, obj, true);
       dataOff += al(8, 16);
     }
 
-    nt.write('_' + name, strOff, 'ascii');  // null terminator from Buffer.alloc
+    nt.set(enc.encode('_' + name), strOff);  // null terminator from Uint8Array zero-fill
 
     // mach_sym_entry @ k*16
     const e = k * 16;
-    nti.writeUInt32LE(strOff, e + 0);  // strx
-    nti.writeUInt8(0xf,       e + 4);  // type: N_SECT | N_EXT
-    nti.writeUInt8(2,         e + 5);  // sect: 2 = __const
-    nti.writeUInt16LE(0,      e + 6);  // desc
-    writeU64(nti, e + 8, valueInSection);  // value = offset within section
+    ntidv.setUint32(e + 0, strOff, true);  // strx
+    nti[e + 4] = 0xf;                       // type: N_SECT | N_EXT
+    nti[e + 5] = 2;                          // sect: 2 = __const
+    ntidv.setUint16(e + 6, 0, true);        // desc
+    writeU64(ntidv, e + 8, valueInSection); // value = offset within section
 
     strOff += name.length + 2;
   }
 
-  const hd = Buffer.alloc(MACH_HDR_SZ);
+  const hd   = new Uint8Array(MACH_HDR_SZ);
+  const hddv = new DataView(hd.buffer);
 
   // mach_header_64
-  hd.writeUInt32LE(0xfeedfacf, MH + 0);  // MH_MAGIC_64
-  hd.writeUInt32LE(arch === 'x64' ? 0x1000007 : 0x100000c, MH + 4);   // cputype
-  hd.writeUInt32LE(arch === 'x64' ? 0x3        : 0x0,       MH + 8);   // cpusubtype
-  hd.writeUInt32LE(0x1,   MH + 12);  // filetype: MH_OBJECT
-  hd.writeUInt32LE(4,     MH + 16);  // ncmds: 4 load commands
-  hd.writeUInt32LE(0x168, MH + 20);  // sizeofcmds = 0xE8+0x18+0x18+0x50 = 360
-  hd.writeUInt32LE(0x200, MH + 24);  // flags: MH_SUBSECTIONS_VIA_SYMBOLS
+  hddv.setUint32(MH + 0,  0xfeedfacf,                              true);  // MH_MAGIC_64
+  hddv.setUint32(MH + 4,  arch === 'x64' ? 0x1000007 : 0x100000c, true);  // cputype
+  hddv.setUint32(MH + 8,  arch === 'x64' ? 0x3        : 0x0,       true);  // cpusubtype
+  hddv.setUint32(MH + 12, 0x1,   true);  // filetype: MH_OBJECT
+  hddv.setUint32(MH + 16, 4,     true);  // ncmds: 4 load commands
+  hddv.setUint32(MH + 20, 0x168, true);  // sizeofcmds = 0xE8+0x18+0x18+0x50 = 360
+  hddv.setUint32(MH + 24, 0x200, true);  // flags: MH_SUBSECTIONS_VIA_SYMBOLS
 
   // LC_SEGMENT_64  (cmd=0x19, cmdsize=0xE8 = 72 + 80×2)
-  hd.writeUInt32LE(0x19, MSEG + 0);
-  hd.writeUInt32LE(0xE8, MSEG + 4);
+  hddv.setUint32(MSEG + 0, 0x19, true);
+  hddv.setUint32(MSEG + 4, 0xE8, true);
   // segname[16]: all zeros = unnamed segment (correct for .o files)
-  writeU64(hd, MSEG + 24, 0);             // vmaddr
-  writeU64(hd, MSEG + 32, dataSz);        // vmsize
-  writeU64(hd, MSEG + 40, MACH_HDR_SZ);  // fileoff
-  writeU64(hd, MSEG + 48, dataSz);        // filesize
-  hd.writeUInt32LE(0x7, MSEG + 56);       // maxprot:  PROT_READ|WRITE|EXEC
-  hd.writeUInt32LE(0x7, MSEG + 60);       // initprot
-  hd.writeUInt32LE(2,   MSEG + 64);       // nsects
+  writeU64(hddv, MSEG + 24, 0);             // vmaddr
+  writeU64(hddv, MSEG + 32, dataSz);        // vmsize
+  writeU64(hddv, MSEG + 40, MACH_HDR_SZ);  // fileoff
+  writeU64(hddv, MSEG + 48, dataSz);        // filesize
+  hddv.setUint32(MSEG + 56, 0x7, true);     // maxprot:  PROT_READ|WRITE|EXEC
+  hddv.setUint32(MSEG + 60, 0x7, true);     // initprot
+  hddv.setUint32(MSEG + 64, 2,   true);     // nsects
 
   // mach_section_64[0]: __text  (empty — placeholder for the TEXT segment)
   setStr(hd, MS1 + 0,  '__text', 16);
   setStr(hd, MS1 + 16, '__TEXT', 16);
   // addr=0, size=0  (zeroed)
-  hd.writeUInt32LE(MACH_HDR_SZ, MS1 + 48);    // offset
+  hddv.setUint32(MS1 + 48, MACH_HDR_SZ,  true);  // offset
   // align=0
-  hd.writeUInt32LE(0x80000000, MS1 + 64);      // flags: S_ATTR_PURE_INSTRUCTIONS
+  hddv.setUint32(MS1 + 64, 0x80000000,   true);  // flags: S_ATTR_PURE_INSTRUCTIONS
 
   // mach_section_64[1]: __const  (actual exported data)
   setStr(hd, MS2 + 0,  '__const', 16);
   setStr(hd, MS2 + 16, '__TEXT',  16);
   // addr=0  (zeroed)
-  writeU64(hd, MS2 + 40, dataSz);              // size
-  hd.writeUInt32LE(MACH_HDR_SZ, MS2 + 48);    // offset
-  hd.writeUInt32LE(0x02, MS2 + 52);            // align: 2^2 = 4 bytes
+  writeU64(hddv, MS2 + 40, dataSz);              // size
+  hddv.setUint32(MS2 + 48, MACH_HDR_SZ, true);  // offset
+  hddv.setUint32(MS2 + 52, 0x02,        true);  // align: 2^2 = 4 bytes
 
   // LC_BUILD_VERSION  (cmd=0x32)
-  hd.writeUInt32LE(0x32,    MMO + 0);
-  hd.writeUInt32LE(0x18,    MMO + 4);
-  hd.writeUInt32LE(0x1,     MMO + 8);   // platform: PLATFORM_MACOS
-  hd.writeUInt32LE(0xa0900, MMO + 12);  // minos: 10.9.0
-  hd.writeUInt32LE(0xa0900, MMO + 16);  // sdk:   10.9.0
+  hddv.setUint32(MMO + 0,  0x32,    true);
+  hddv.setUint32(MMO + 4,  0x18,    true);
+  hddv.setUint32(MMO + 8,  0x1,     true);   // platform: PLATFORM_MACOS
+  hddv.setUint32(MMO + 12, 0xa0900, true);   // minos: 10.9.0
+  hddv.setUint32(MMO + 16, 0xa0900, true);   // sdk:   10.9.0
 
   // LC_SYMTAB  (cmd=0x2)
-  hd.writeUInt32LE(0x2,                       MSYM + 0);
-  hd.writeUInt32LE(0x18,                      MSYM + 4);
-  hd.writeUInt32LE(MACH_HDR_SZ + dataSz,      MSYM + 8);   // symoff
-  hd.writeUInt32LE(symbols.length,             MSYM + 12);  // nsyms
-  hd.writeUInt32LE(MACH_HDR_SZ + dataSz + symTabSz, MSYM + 16);  // stroff
-  hd.writeUInt32LE(strTabSz,                   MSYM + 20);  // strsize
+  hddv.setUint32(MSYM + 0,  0x2,                            true);
+  hddv.setUint32(MSYM + 4,  0x18,                           true);
+  hddv.setUint32(MSYM + 8,  MACH_HDR_SZ + dataSz,          true);  // symoff
+  hddv.setUint32(MSYM + 12, symbols.length,                 true);  // nsyms
+  hddv.setUint32(MSYM + 16, MACH_HDR_SZ + dataSz + symTabSz, true);  // stroff
+  hddv.setUint32(MSYM + 20, strTabSz,                       true);  // strsize
 
   // LC_DYSYMTAB  (cmd=0xb)
-  hd.writeUInt32LE(0xb,            MDYS + 0);
-  hd.writeUInt32LE(0x50,           MDYS + 4);
+  hddv.setUint32(MDYS + 0,  0xb,            true);
+  hddv.setUint32(MDYS + 4,  0x50,           true);
   // localoff=0, nlocals=0  (zeroed)
-  hd.writeUInt32LE(symbols.length, MDYS + 20);  // nextdef
-  hd.writeUInt32LE(symbols.length, MDYS + 24);  // undefoff
+  hddv.setUint32(MDYS + 20, symbols.length, true);  // nextdef
+  hddv.setUint32(MDYS + 24, symbols.length, true);  // undefoff
 
-  return Buffer.concat([hd, dt, nti, nt]);
+  return concat([hd, dt, nti, nt]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -377,7 +396,7 @@ const EY = { NAME:0, INFO:4, OTHER:5, SECTIDX:6, VALUE:8, SIZE:16 };
 
 const sectOfs = (idx: number): number => ELF_HDR_SZ + idx * ELF_SECT_SZ;
 
-function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
+function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Uint8Array {
   const SH_NAMES = '\0.symtab\0.strtab\0.rodata\0.note.GNU-stack\0';
   //               idx: 0   1        9        17       25
   const I_SYMTAB = 1, I_STRTAB = 9, I_RODATA = 17, I_NOTE = 25;
@@ -386,18 +405,21 @@ function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
 
   for (const { name, obj } of symbols) {
     strTabSz += name.length + 1;
-    if      (obj instanceof Uint8Array)    dataSz += al(obj.length, 8);
-    else if (typeof obj === 'string') dataSz += al(obj.length + 1, 8);
-    else if (typeof obj === 'number') dataSz += 8;
+    if      (obj instanceof Uint8Array) dataSz += al(obj.length, 8);
+    else if (typeof obj === 'string')   dataSz += al(obj.length + 1, 8);
+    else if (typeof obj === 'number')   dataSz += 8;
     else throw new Error('Invalid symbol type');
   }
 
   // Symbol table: one null entry (index 0) + one per export
-  const symd = Buffer.alloc(al(ELF_SYM_SZ * (symbols.length + 1), 16));
-  const ts   = Buffer.alloc(al(strTabSz, 16));
-  const d    = Buffer.alloc(al(dataSz, 16));
+  const symd = new Uint8Array(al(ELF_SYM_SZ * (symbols.length + 1), 16));
+  const ts   = new Uint8Array(al(strTabSz, 16));
+  const d    = new Uint8Array(al(dataSz, 16));
 
-  ts.write(SH_NAMES, 0, 'ascii');
+  const symdv = new DataView(symd.buffer);
+  const ddv   = new DataView(d.buffer);
+
+  ts.set(enc.encode(SH_NAMES), 0);
 
   let strOff = SH_NAMES.length, dataOff = 0;
 
@@ -405,52 +427,53 @@ function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
     const { name, obj } = symbols[k]!;
     const sb = (k + 1) * ELF_SYM_SZ;  // skip null symbol at index 0
 
-    symd.writeUInt32LE(strOff, sb + EY.NAME);
-    symd.writeUInt8(0x11,      sb + EY.INFO);     // STB_GLOBAL|STT_OBJECT = (1<<4)|1
-    symd.writeUInt8(0,         sb + EY.OTHER);
-    symd.writeUInt16LE(3,      sb + EY.SECTIDX);  // .rodata = section 3
-    writeU64(symd, sb + EY.VALUE, dataOff);
+    symdv.setUint32(sb + EY.NAME,    strOff, true);
+    symd[sb + EY.INFO]  = 0x11;              // STB_GLOBAL|STT_OBJECT = (1<<4)|1
+    symd[sb + EY.OTHER] = 0;
+    symdv.setUint16(sb + EY.SECTIDX, 3,     true);  // .rodata = section 3
+    writeU64(symdv, sb + EY.VALUE, dataOff);
 
-    ts.write(name, strOff, 'ascii');
+    ts.set(enc.encode(name), strOff);
     strOff += name.length + 1;
 
     if (obj instanceof Uint8Array) {
       d.set(obj, dataOff);
-      writeU64(symd, sb + EY.SIZE, obj.length);
+      writeU64(symdv, sb + EY.SIZE, obj.length);
       dataOff += al(obj.length, 8);
     } else if (typeof obj === 'string') {
-      d.write(obj, dataOff, 'ascii');
-      writeU64(symd, sb + EY.SIZE, obj.length + 1);
+      d.set(enc.encode(obj), dataOff);
+      writeU64(symdv, sb + EY.SIZE, obj.length + 1);
       dataOff += al(obj.length + 1, 8);
     } else if (typeof obj === 'number') {
-      d.writeDoubleLE(obj, dataOff);
-      writeU64(symd, sb + EY.SIZE, 8);
+      ddv.setFloat64(dataOff, obj, true);
+      writeU64(symdv, sb + EY.SIZE, 8);
       dataOff += 8;
     }
   }
 
   // ── ELF header + section headers ───────────────────────────────────────────
 
-  const hd    = Buffer.alloc(ELF_STRUCT_SZ);
-  const mach  = arch === 'x64' ? 0x3e : 0xb7;
+  const hd   = new Uint8Array(ELF_STRUCT_SZ);
+  const hddv = new DataView(hd.buffer);
+  const mach = arch === 'x64' ? 0x3e : 0xb7;
 
   // ELF64Header @ 0
-  hd.write('\x7fELF', 0, 'ascii');
-  hd.writeUInt8(2, 4);   // EI_CLASS:   ELFCLASS64
-  hd.writeUInt8(1, 5);   // EI_DATA:    ELFDATA2LSB
-  hd.writeUInt8(1, 6);   // EI_VERSION: EV_CURRENT
+  hd.set([0x7f, 0x45, 0x4c, 0x46], 0);  // \x7fELF
+  hd[4] = 2;  // EI_CLASS:   ELFCLASS64
+  hd[5] = 1;  // EI_DATA:    ELFDATA2LSB
+  hd[6] = 1;  // EI_VERSION: EV_CURRENT
   // osabi=0, abiversion=0, epad=0
-  hd.writeUInt16LE(1,      16);  // e_type:    ET_REL
-  hd.writeUInt16LE(mach,   18);  // e_machine
-  hd.writeUInt32LE(1,      20);  // e_version: EV_CURRENT
+  hddv.setUint16(16, 1,    true);  // e_type:    ET_REL
+  hddv.setUint16(18, mach, true);  // e_machine
+  hddv.setUint32(20, 1,    true);  // e_version: EV_CURRENT
   // e_entry=0, e_phoff=0  (zeroed)
-  writeU64(hd, 40, ELF_HDR_SZ);          // e_shoff: section headers right after hdr
+  writeU64(hddv, 40, ELF_HDR_SZ);           // e_shoff: section headers right after hdr
   // e_flags=0  (zeroed)
-  hd.writeUInt16LE(ELF_HDR_SZ,  52);     // e_ehsize
+  hddv.setUint16(52, ELF_HDR_SZ,  true);    // e_ehsize
   // e_phentsize=0, e_phnum=0  (zeroed)
-  hd.writeUInt16LE(ELF_SECT_SZ, 58);     // e_shentsize
-  hd.writeUInt16LE(6,            60);     // e_shnum
-  hd.writeUInt16LE(2,            62);     // e_shstrndx: .strtab = section 2
+  hddv.setUint16(58, ELF_SECT_SZ, true);    // e_shentsize
+  hddv.setUint16(60, 6,           true);    // e_shnum
+  hddv.setUint16(62, 2,           true);    // e_shstrndx: .strtab = section 2
 
   const symtabOfs = ELF_STRUCT_SZ;
   const strtabOfs = ELF_STRUCT_SZ + symd.length;
@@ -461,38 +484,38 @@ function doObjectLinux(symbols: ObjSymbol[], arch: TargetArch): Buffer {
 
   // Section[1]: .symtab
   const s1 = sectOfs(1);
-  hd.writeUInt32LE(I_SYMTAB,  s1 + ES.NAME);
-  hd.writeUInt32LE(2,         s1 + ES.TYPE);   // SHT_SYMTAB
-  writeU64(hd, s1 + ES.OFS,   symtabOfs);
-  writeU64(hd, s1 + ES.SIZE,  symd.length);
-  hd.writeUInt32LE(2,         s1 + ES.LINK);   // associated .strtab = section 2
-  hd.writeUInt32LE(1,         s1 + ES.INFO);   // first global symbol index
-  writeU64(hd, s1 + ES.ALIGN, 8);
-  writeU64(hd, s1 + ES.ENTSZ, ELF_SYM_SZ);
+  hddv.setUint32(s1 + ES.NAME, I_SYMTAB, true);
+  hddv.setUint32(s1 + ES.TYPE, 2,        true);  // SHT_SYMTAB
+  writeU64(hddv, s1 + ES.OFS,   symtabOfs);
+  writeU64(hddv, s1 + ES.SIZE,  symd.length);
+  hddv.setUint32(s1 + ES.LINK, 2, true);         // associated .strtab = section 2
+  hddv.setUint32(s1 + ES.INFO, 1, true);         // first global symbol index
+  writeU64(hddv, s1 + ES.ALIGN, 8);
+  writeU64(hddv, s1 + ES.ENTSZ, ELF_SYM_SZ);
 
   // Section[2]: .strtab
   const s2 = sectOfs(2);
-  hd.writeUInt32LE(I_STRTAB,  s2 + ES.NAME);
-  hd.writeUInt32LE(3,         s2 + ES.TYPE);   // SHT_STRTAB
-  writeU64(hd, s2 + ES.OFS,   strtabOfs);
-  writeU64(hd, s2 + ES.SIZE,  ts.length);
+  hddv.setUint32(s2 + ES.NAME, I_STRTAB, true);
+  hddv.setUint32(s2 + ES.TYPE, 3,        true);  // SHT_STRTAB
+  writeU64(hddv, s2 + ES.OFS,  strtabOfs);
+  writeU64(hddv, s2 + ES.SIZE, ts.length);
 
   // Section[3]: .rodata
   const s3 = sectOfs(3);
-  hd.writeUInt32LE(I_RODATA,  s3 + ES.NAME);
-  hd.writeUInt32LE(1,         s3 + ES.TYPE);   // SHT_PROGBITS
-  writeU64(hd, s3 + ES.FLAGS, 2);              // SHF_ALLOC
-  writeU64(hd, s3 + ES.OFS,   rodataOfs);
-  writeU64(hd, s3 + ES.SIZE,  d.length);
+  hddv.setUint32(s3 + ES.NAME, I_RODATA, true);
+  hddv.setUint32(s3 + ES.TYPE, 1,        true);  // SHT_PROGBITS
+  writeU64(hddv, s3 + ES.FLAGS, 2);              // SHF_ALLOC
+  writeU64(hddv, s3 + ES.OFS,   rodataOfs);
+  writeU64(hddv, s3 + ES.SIZE,  d.length);
 
   // Section[4]: .note.GNU-stack  (empty; signals non-executable stack to linker)
   const s4 = sectOfs(4);
-  hd.writeUInt32LE(I_NOTE,    s4 + ES.NAME);
-  hd.writeUInt32LE(1,         s4 + ES.TYPE);   // SHT_PROGBITS
-  writeU64(hd, s4 + ES.OFS,   noteOfs);
+  hddv.setUint32(s4 + ES.NAME, I_NOTE, true);
+  hddv.setUint32(s4 + ES.TYPE, 1,      true);    // SHT_PROGBITS
+  writeU64(hddv, s4 + ES.OFS, noteOfs);
   // size=0, flags=0  (zeroed)
 
-  return Buffer.concat([hd, symd, ts, d]);
+  return concat([hd, symd, ts, d]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -503,7 +526,7 @@ function dispatch(
   symbols:  ObjSymbol[],
   arch:     TargetArch     = hostArch(),
   platform: TargetPlatform = hostPlatform(),
-): Buffer {
+): Uint8Array {
   switch (platform) {
     case 'win32': return doObjectWindows(symbols, arch);
     case 'macos': return doObjectMacOS(symbols, arch);
@@ -518,7 +541,7 @@ export function encodeObject(
   obj:       SymbolValue,
   arch?:     TargetArch,
   platform?: TargetPlatform,
-): Buffer {
+): Uint8Array {
   return dispatch([{ name, obj }], arch, platform);
 }
 
@@ -527,6 +550,6 @@ export function encodeSymbols(
   symbols:   ObjSymbol[],
   arch?:     TargetArch,
   platform?: TargetPlatform,
-): Buffer {
+): Uint8Array {
   return dispatch(symbols, arch, platform);
 }
