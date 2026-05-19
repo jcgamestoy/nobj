@@ -177,11 +177,13 @@ function doObjectWindows(symbols: ObjSymbol[], arch: TargetArch): Uint8Array {
   hddv.setUint32(COFF_HDR_SZ + 36, 0x00100a00,   true);  // flags
 
   // CoffSection[1]: .rdata @ 60
-  const rdataPtr = al(COFF_TOTAL_SZ + symd.length + tsd.length + tsed.length, 8);
+  // ARM64 ldr/str require 8-byte alignment; x64 works fine with 4-byte but 8 is harmless.
+  const rdataPtr   = al(COFF_TOTAL_SZ + symd.length + tsd.length + tsed.length, 8);
+  const rdataFlags = arch === 'arm64' ? 0x40400040 : 0x40300040;  // ALIGN_8BYTES vs ALIGN_4BYTES
   setStr(hd, COFF_HDR_SZ + COFF_SECT_SZ, '.rdata', 8);
   hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 16, dsd.length,  true);
   hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 20, rdataPtr,    true);
-  hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 36, 0x40300040,  true);
+  hddv.setUint32(COFF_HDR_SZ + COFF_SECT_SZ + 36, rdataFlags,  true);
 
   // CoffSymbol: .rdata section symbol @ 100
   setStr(hd, 100, '.rdata', 8);

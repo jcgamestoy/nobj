@@ -1,6 +1,6 @@
 {
   "name": "@retrovm/nobj",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Generate native linkable object files (COFF, Mach-O, ELF64) from TypeScript/Bun — zero native dependencies",
   "license": "MIT",
   "author": "Juan Carlos González Amestoy",
